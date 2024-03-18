@@ -1,0 +1,466 @@
+﻿Program.Sub.ScreenSU.Start
+Gui.frmRMA..Create(BaseForm)
+Gui.frmRMA..Caption("RMA Dashboard 6388")
+Gui.frmRMA..Size(15360,10800)
+Gui.frmRMA..MinX(0)
+Gui.frmRMA..MinY(0)
+Gui.frmRMA..Position(0,0)
+Gui.frmRMA..AlwaysOnTop(False)
+Gui.frmRMA..FontName("Tahoma")
+Gui.frmRMA..FontSize(8.25)
+Gui.frmRMA..ControlBox(True)
+Gui.frmRMA..MaxButton(True)
+Gui.frmRMA..MinButton(True)
+Gui.frmRMA..MousePointer(0)
+Gui.frmRMA..Moveable(True)
+Gui.frmRMA..Sizeable(True)
+Gui.frmRMA..ShowInTaskBar(True)
+Gui.frmRMA..TitleBar(True)
+Gui.frmRMA..Event(UnLoad,frmRMA_UnLoad)
+Gui.frmRMA.GsGCRMA.Create(GsGridControl)
+Gui.frmRMA.GsGCRMA.Enabled(True)
+Gui.frmRMA.GsGCRMA.Visible(True)
+Gui.frmRMA.GsGCRMA.Zorder(0)
+Gui.frmRMA.GsGCRMA.Size(15180,9825)
+Gui.frmRMA.GsGCRMA.Position(75,255)
+Program.Sub.ScreenSU.End
+
+Program.Sub.Preflight.Start
+V.Global.bConOpen.Declare(Boolean, False)
+V.Global.gvRMA.Declare(Boolean, False)
+Program.Sub.Preflight.End
+Program.Sub.Main.Start
+'Project: 6388 Custom RMA Dashboard 
+'Customer: GM Lighting LLC 
+'Author: Brandon Medina 
+'Date: 6/14/21
+'Adding custom columns from RMA tables with typical features such as filtering & export 
+
+F.Intrinsic.Control.Try
+	Gui.frmRMA..Show
+	F.Intrinsic.Control.CallSub(SetContextMenus)
+	F.Intrinsic.Control.CallSub(LoaddtRMA)
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndTry
+Program.Sub.Main.End
+
+Program.Sub.LoaddtRMA.Start
+F.Intrinsic.Control.Try
+	V.Local.sSQL.Declare
+	V.Local.sOriginal.Declare
+	V.Local.sExtraFeeNames.Declare
+	V.Local.sExtraFeeValues.Declare
+	V.Local.sToParse.Declare
+	V.Local.i.Declare
+	V.Local.j.Declare(Long)
+	V.Local.k.Declare(Long)
+	V.Local.iMatchIndex.Declare
+	V.Local.iRMALineValueSize.Declare
+	V.Local.sRMALineValue.Declare
+	'Will contain parsed extra fee titles & extra fee amt 
+	V.Local.sRMASubLineValue.Declare
+	'Used for notes and instances that don't adhere to " - " delimiter
+	V.Local.sNoteBuildup.Declare
+	V.Local.bStringHasBreak.Declare
+	V.Local.bNegativeCheck.Declare
+	V.Local.sRMA.Declare
+	V.Local.bHasForbiddenCaption.Declare
+	V.Local.sDate.Declare
+	V.Local.sDistributor.Declare
+	V.Local.sRep.Declare
+	V.Local.sBranchCode.Declare
+	V.Local.sLine.Declare
+	
+	F.Intrinsic.Control.If(V.Global.gvRMA)
+		F.Intrinsic.Control.CallSub("Serialize")
+	F.Intrinsic.Control.EndIf
+	'RMA_HEADER RH
+	'CUSTOMER_MASTER CM
+	'RMA_LN_SVRQ_NOTES RN
+	'RMA_SVC_REC RR
+	'RMA_LINES RL
+	
+	'V.Local.sSQL.Set("select RH.RMA_ID as RMA_NUMBER, RH.DATE_ISSUED, CM.NAME_CUSTOMER as DISTRIBUTOR, CM.SALESPERSON as REP, CM.TERRITORY as BRANCH_CODE, RN.ORDER_NO, RN.LINE, replace(RN.TEXT, '$', '') as FULL_AMT, RR.DESCR as RETURN_REASON from V_RMA_HEADER RH inner join V_CUSTOMER_MASTER CM on CM.CUSTOMER = RH.CUSTOMER inner join V_RMA_LN_SVRQ_NOTES RN on RN.RMA_ID = RH.RMA_ID inner join V_RMA_LINES RL on RN.RMA_ID = RL.RMA_ID and RN.LINE = RL.RMA_LINE inner join RMA_SVC_REC RR on RL.SERVICE_REQUESTED = RR.SVC_ID order by RH.RMA_ID")
+	
+	'Normalize Text field w " - " delimiter. This Accounts for some cases where data is "TOTAL $100" (missing dash) or "RESTOCKING FEE -$100" (- here denotes negative, and needs " - " as the delimiter). Also Strips $ off the number so that Grid Group Summary item method will function 
+	V.Local.sSQL.Set("select RH.RMA_ID as RMA_NUMBER, RH.DATE_ISSUED, CM.NAME_CUSTOMER as DISTRIBUTOR, CM.SALESPERSON as REP, CM.TERRITORY as BRANCH_CODE, RN.ORDER_NO, RN.LINE, replace(replace(replace(RN.TEXT, 'FEE -$', 'FEE - -$'), 'TAL $', 'TAL - $'), '$', '') as FULL_AMT, RR.DESCR as RETURN_REASON from V_RMA_HEADER RH inner join V_CUSTOMER_MASTER CM on CM.CUSTOMER = RH.CUSTOMER inner join V_RMA_LN_SVRQ_NOTES RN on RN.RMA_ID = RH.RMA_ID inner join V_RMA_LINES RL on RN.RMA_ID = RL.RMA_ID and RN.LINE = RL.RMA_LINE inner join RMA_SVC_REC RR on RL.SERVICE_REQUESTED = RR.SVC_ID order by RH.RMA_ID")
+	F.ODBC.Connection!con.OpenCompanyConnection
+	V.Global.bConOpen.Set(True)
+	F.Data.Datatable.CreateFromSQL("dtRMA", "con", V.Local.sSQL, True)
+	F.Data.Datatable.AddColumn("dtRMA", "ADDL_FEE_TITLE", "String")
+	'F.Data.Datatable.AddColumn("dtRMA", "ADDL_FEE_VALUE", "String")
+'	'RMA_LINES RL
+
+	'Last line has extra text/ dollar values that need to be parsed and added as row under their respective RMAs 
+	'Sure there's a better way than looping through one by one... 
+	F.Intrinsic.Control.For(V.Local.i, 0, V.DataTable.dtRMA.RowCount--, 1) 
+		V.Local.sOriginal.Set(V.DataTable.dtRMA(V.Local.i).FULL_AMT!FieldValTrim)
+		F.Intrinsic.String.Split(V.Local.sOriginal, V.Ambient.NewLine, V.Local.sRMALineValue)
+		'If size of "array" is 1, then leave alone. Means it just has a price 
+		F.Intrinsic.Math.Add(V.Local.sRMALineValue.UBound, 1, V.Local.iRMALineValueSize)
+		F.Intrinsic.Control.If(V.Local.iRMALineValueSize, <>, 1, AND, V.Local.sRMALineValue(0), <>, "")
+			'Iterate through the array on the RMA line containing parsed stuff/ things to further parse ie Extra Fee Names & Extra Fee Values 
+			F.Intrinsic.Control.For(V.Local.j, 0, V.Local.sRMALineValue.UBound, 1)
+				'If blank, skip and continue to next index
+				F.Intrinsic.Control.If(V.Local.sRMALineValue(V.Local.j), <>, "")
+					'Replace line's full amt entry w first index, which always contains a number
+					F.Intrinsic.Control.If(V.Local.j, =, 0)
+						F.Data.Datatable.SetValue("dtRMA", V.Local.i, "FULL_AMT", V.Local.sRMALineValue(V.Local.j))
+					'Otherwise check what kind of extra fee it is and parse the title from the amount
+					F.Intrinsic.Control.Else
+						'First get last line's data 
+						V.Local.sDate.Set(V.DataTable.dtRMA(V.Local.i).DATE_ISSUED!FieldValTrim)
+						V.Local.sDistributor.Set(V.DataTable.dtRMA(V.Local.i).DISTRIBUTOR!FieldValTrim)
+						V.Local.sRep.Set(V.DataTable.dtRMA(V.Local.i).REP!FieldValTrim)
+						V.Local.sBranchCode.Set(V.DataTable.dtRMA(V.Local.i).BRANCH_CODE!FieldValTrim)
+						V.Local.sRMA.Set(V.DataTable.dtRMA(V.Local.i).RMA_NUMBER!FieldValTrim)
+						F.Intrinsic.Math.Add(V.DataTable.dtRMA(V.Local.i).LINE!FieldValTrim, 1, V.Local.sLine)
+						F.Intrinsic.String.LPad(V.Local.sLine, "0", 6, V.Local.sLine)
+						F.Intrinsic.String.Split(V.Local.sRMALineValue(V.Local.j), " - ", V.Local.sRMASubLineValue)
+							F.Intrinsic.Control.If(V.Local.sRMASubLineValue.UBound, =, 1)
+								'Modify: No longer include TOTAL or SUBTOTAL in the grid at all. Check if last line contains total or subtotal and discard if so 
+								F.Intrinsic.String.IsInString(V.Local.sRMASubLineValue(0), "TOTAL", False, V.Local.bHasForbiddenCaption)
+								F.Intrinsic.Control.If(V.Local.bHasForbiddenCaption.Not)
+									'Add Title to column ADDL_FEE_TITLE & dollar amt to FULL_AMT (should have 2 indices, 0 = title, 1 = value)
+									'F.Data.Datatable.AddRow("dtRMA", "RMA_NUMBER", V.Local.sRMA, "ADDL_FEE_TITLE", V.Local.sRMASubLineValue(0), "ADDL_FEE_VALUE", V.Local.sRMASubLineValue(1))
+									'Reverse value to be negative? 
+									F.Intrinsic.String.IsInString(V.Local.sRMASubLineValue(1), "-", False, V.Local.bNegativeCheck.Declare)
+									F.Intrinsic.Control.If(V.Local.bNegativeCheck.Not)
+										F.Intrinsic.String.Build("-{0}", V.Local.sRMASubLineValue(1), V.Local.sRMASubLineValue(1))
+									F.Intrinsic.Control.EndIf
+									F.Data.Datatable.AddRow("dtRMA", "RMA_NUMBER", V.Local.sRMA, "ADDL_FEE_TITLE", V.Local.sRMASubLineValue(0), "FULL_AMT", V.Local.sRMASubLineValue(1), "DATE_ISSUED", V.Local.sDate, "DISTRIBUTOR", V.Local.sDistributor, "REP", V.Local.sRep, "BRANCH_CODE", V.Local.sBranchCode, "LINE", V.Local.sLine)
+									'To keep RMAs together when user exports, move this newly added row below the bottom most RMA number 
+									F.Data.Datatable.MoveRow("dtRMA", V.DataTable.dtRMA.RowCount--, V.Local.i.++)
+								F.Intrinsic.Control.EndIf
+							F.Intrinsic.Control.Else
+							'Means data either has another case that doesn't adhere to being delimited by " - ", or contains a note. Concat all index values and set it to just the Full amt 
+								V.Local.sNoteBuildup.Set("")
+								F.Intrinsic.Control.For(V.Local.k, 0, V.Local.sRMASubLineValue.UBound, 1)
+									F.Intrinsic.String.Concat(V.Local.sNoteBuildup, V.Local.sRMASubLineValue(V.Local.k), V.Local.sNoteBuildup)
+								F.Intrinsic.Control.Next(V.Local.k)
+								'F.Data.Datatable.AddRow("dtRMA", "RMA_NUMBER", V.Local.sRMA, "FULL_AMT", V.Local.sNoteBuildup)
+								F.Data.Datatable.AddRow("dtRMA", "RMA_NUMBER", V.Local.sRMA, "FULL_AMT", V.Local.sNoteBuildup, "DATE_ISSUED", V.Local.sDate, "DISTRIBUTOR", V.Local.sDistributor, "REP", V.Local.sRep, "BRANCH_CODE", V.Local.sBranchCode, "LINE", V.Local.sLine)
+								'To keep RMAs together when user exports, move this newly added row below the bottom most RMA number 
+								F.Data.Datatable.MoveRow("dtRMA", V.DataTable.dtRMA.RowCount--, V.Local.i.++)
+							F.Intrinsic.Control.EndIf
+					F.Intrinsic.Control.EndIf
+				F.Intrinsic.Control.EndIf
+			F.Intrinsic.Control.Next(V.Local.j)
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.Next(V.Local.i)
+	
+	F.ODBC.Connection!con.Close
+	V.Global.bConOpen.Set(False)
+	
+	F.Intrinsic.Control.CallSub(LoaddtClosedRMA)
+	F.Data.Datatable.Merge("dtRMAHist", "dtRMA", True, 1)
+	
+	F.Intrinsic.Control.CallSub(LoadgvRMA)
+	F.Intrinsic.Control.CallSub("Deserialize", "sItemControl", "GsGCRMA", "sItemGrid", "gvRMA")
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndTry
+Program.Sub.LoaddtRMA.End
+Program.Sub.LoadgvRMA.Start
+F.Intrinsic.Control.Try
+	V.Local.sColumnNames.Declare
+	V.Local.i.Declare
+	
+	'Overall Attributes 
+	Gui.frmRMA.GsGCRMA.SuspendLayout()
+	Gui.frmRMA.GsGCRMA.AddGridviewFromDatatable("gvRMA", "dtRMA")
+	Gui.frmRMA.GsGCRMA.SetGridviewProperty("gvRMA","AllowSort", True)
+	Gui.frmRMA.GsGCRMA.SetGridviewProperty("gvRMA","AllowFilter", True)
+	Gui.frmRMA.GsGCRMA.SetGridviewProperty("gvRMA","OptionsFindAlwaysVisible", True)
+	Gui.frmRMA.GsGCRMA.SetGridviewProperty("gvRMA", "ShowGroupPanel", True)
+	
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "DATE_ISSUED", "DisplayCustomDateTime", "d")
+	
+	'Set Field Headers Bold & No edit + read only 
+	F.Intrinsic.String.Split(V.DataTable.dtRMA.FieldNames, "*!*", V.Local.sColumnNames)
+	F.Intrinsic.Control.For(V.Local.i, 0, V.Local.sColumnNames.UBound, 1)
+		Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", V.Local.sColumnNames(V.Local.i), "HeaderFontBold", True)
+		Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", V.Local.sColumnNames(V.Local.i), "AllowEdit", False)
+		Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", V.Local.sColumnNames(V.Local.i), "ReadOnly", True)
+	F.Intrinsic.Control.Next(V.Local.i)
+	
+	'Caption
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "RMA_NUMBER", "Caption", "RMA Number")
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "DATE_ISSUED", "Caption", "Date")
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "DISTRIBUTOR", "Caption", "Distributor") 
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "REP", "Caption", "Rep")
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "BRANCH_CODE", "Caption", "Branch Code")
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "ORDER_NO", "Caption", "Order No")
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "LINE", "Caption", "Line")
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "FULL_AMT", "Caption", "Full Amount($)")
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "RETURN_REASON", "Caption", "Reason for Return")
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "ADDL_FEE_TITLE", "Caption", "Fee Type")
+	'Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "ADDL_FEE_VALUE", "Caption", "Fee Value")
+	
+	'Min Width
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "RMA_NUMBER", "MinWidth", 70)
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "DATE_ISSUED", "MinWidth", 70)
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "DISTRIBUTOR", "MinWidth", 80)
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "REP", "MinWidth", 20)
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "BRANCH_CODE", "MinWidth", 20)
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "FULL_AMT", "MinWidth", 75)
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "RETURN_REASON", "MinWidth", 70)
+
+	'Visible 
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "ORDER_NO", "Visible", False)
+	Gui.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "LINE", "Visible", False)
+	GUi.frmRMA.GsGCRMA.SetColumnProperty("gvRMA", "CLOSED", "Visible", False)
+	
+	'Color Closed v Open RMAs 
+	Gui.frmRMA.GsGCRMA.AddStyleFormatCondition("gvRMA", "CLOSED", "RowR", "Equal", "Y")
+	Gui.frmRMA.GsGCRMA.SetStyleFormatConditionProperty("gvRMA", "CLOSED", "RowR", "BackColor", "#ff5f5f")
+	Gui.frmRMA.GsGCRMA.SetStyleFormatConditionProperty("gvRMA", "CLOSED", "RowR", "ApplyToRow", True)
+	
+	'Restocking Fee 
+	Gui.frmRMA.GsGCRMA.AddGridGroupSummaryItem("gvRMA", "FULL_AMT", "FULL_AMT", "Sum", "Restocking Fee: ","", c2)
+	
+	'Set GridView anchors 
+	Gui.frmRMA.GsGCRMA.Anchor(15)
+	
+	Gui.frmRMA.GsGCRMA.ResumeLayout()
+	Gui.frmRMA.GsGCRMA.MainView("gvRMA")
+	V.Global.gvRMA.Set(True)
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndTry
+Program.Sub.LoadgvRMA.End
+
+Program.Sub.SetContextMenus.Start
+F.Intrinsic.Control.Try
+	Gui.frmRMA..ContextMenuCreate("ctxRMA")
+	Gui.frmRMA.GsGCRMA.ContextMenuAttach("ctxRMA")
+	Gui.frmRMA..ContextMenuAddItem("ctxRMA", "Export", 0, "Export")
+	
+	Gui.frmRMA..ContextMenuSetItemEventHandler("ctxRMA", "Export", "MenuClickExport")
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndTry
+Program.Sub.SetContextMenus.End
+
+Program.Sub.MenuClickExport.Start
+F.Intrinsic.Control.Try
+	V.Local.sFileExport.Declare
+	V.Local.bExcel.Declare
+	V.Local.bFileLocked.Declare
+	V.Local.sMsg.Declare
+
+	F.Automation.MSExcel.CheckPresence(V.Local.bExcel)
+	
+	F.Intrinsic.Control.If(V.Local.bExcel)
+    	F.Intrinsic.String.Build("{0}GCG_6388_RMADash_{1}.xlsx",V.Caller.LocalGssTempDir,v.Ambient.Now.FormatMMDDYYYYHhNnSs,V.Local.sFileExport)
+        F.Intrinsic.File.IsFileLocked(V.Local.sFileExport,V.Local.bFileLocked)
+        F.Intrinsic.Control.If(V.Local.bFileLocked)
+            F.Intrinsic.String.Build("File is already open. Please close and export again.{0}File: {1}",V.Ambient.NewLine,V.Local.sFileExport,V.Local.sMsg)
+            F.Intrinsic.UI.Msgbox(V.Local.sMsg,"File In Use")
+        F.Intrinsic.Control.Else
+           	Gui.frmRMA.GsGCRMA.Export(V.Local.sFileExport,"xlsx")
+            F.Intrinsic.Task.ShellExec(0,"Open",V.Local.sFileExport,"","",1)
+        F.Intrinsic.Control.EndIf
+    F.Intrinsic.Control.Else
+        F.Intrinsic.String.Build("{0}GCG_6388_RMADash_{1}.xlsx",V.Caller.LocalGssTempDir,v.Ambient.Now.FormatMMDDYYHhNnSs,V.Local.sFileExport)
+        F.Intrinsic.File.IsFileLocked(V.Local.sFileExport,V.Local.bFileLocked)
+        F.Intrinsic.Control.If(V.Local.bFileLocked)
+            F.Intrinsic.String.Build("File is already open. Please close and export again.{0}File: {1}",V.Ambient.NewLine,V.Local.sFileExport,V.Local.sMsg)
+            F.Intrinsic.UI.Msgbox(V.Local.sMsg,"File In Use")
+        F.Intrinsic.Control.Else
+            Gui.frmRMA.GsGCRMA.Export(V.Local.sFileExport,"csv")
+        F.Intrinsic.Control.EndIf
+        F.Intrinsic.Task.ShellExec(0,"Open",V.Local.sFileExport,"","",1)
+    F.Intrinsic.Control.EndIf	
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndTry
+Program.Sub.MenuClickExport.End
+
+Program.Sub.ErrorMsg.Start
+v.Local.sError.Declare
+
+F.Intrinsic.Control.If(V.Global.bConOpen)
+	F.ODBC.Connection!con.Close
+F.Intrinsic.Control.EndIf
+
+'Generic Error message.
+f.Intrinsic.String.Build("Project GCG_6338_RMADash.g2u {0}{0}Subroutine: {1}{0}Error: {2} with Description: {3}", v.Ambient.NewLine, v.Args.CurrentSub, v.Ambient.ErrorNumber, v.Ambient.ErrorDescription, v.Local.sError)
+f.Intrinsic.UI.Msgbox(v.Local.sError)
+Program.Sub.ErrorMsg.End
+Program.Sub.frmRMA_UnLoad.Start
+F.Intrinsic.Control.Try
+	F.Intrinsic.Control.CallSub("Serialize")
+	
+	F.Intrinsic.Control.If(V.Global.bConOpen)
+		F.ODBC.Connection!con.Close
+		V.Global.bConOpen.Set(False)
+	F.Intrinsic.Control.EndIf
+	
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndTry
+Program.Sub.frmRMA_UnLoad.End
+
+Program.Sub.Serialize.Start
+F.Intrinsic.Control.Try
+	V.Local.sSerialize.Declare
+	v.Local.sControl.Declare
+	v.Local.sGrid.Declare
+	v.Local.iCnt.Declare
+	v.Local.sItemControl.Declare
+	v.Local.sItemGrid.Declare
+	v.Local.sSQL.Declare
+	v.Local.sUserID.Declare
+
+'Seq 1 = gvRMA
+	F.Global.Registry.ReadValue(V.Caller.User, V.Caller.CompanyCode, "GCG_6388_RMADash.g2u", 1, 1, 6, "", V.Local.sSerialize)
+	F.Intrinsic.Control.If(V.Local.sSerialize.Trim, <>, "")
+		F.ODBC.Connection!Common.OpenCommonConnection
+		F.ODBC.Connection!common.Execute("Delete From Gs_Registry Where Program = 'GCG_6388_RMADASH' and Reg_ID = 1 And Seq = 1;")
+		F.ODBC.Connection!common.Close
+	F.Intrinsic.Control.EndIf
+	Gui.frmRMA.GsGCRMA.Serialize("gvRMA", V.Local.sSerialize)
+	F.Global.Registry.AddValue(V.Caller.User, V.Caller.CompanyCode, "GCG_6388_RMADash.g2u", 1, 1, False, "Serialize", False, 0, -999.0,1/1/1980,12:00:00 AM,V.Local.sSerialize)
+
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndTry
+Program.Sub.Serialize.End
+
+Program.Sub.Deserialize.Start
+F.Intrinsic.Control.Try
+	V.Local.sError.Declare	
+	V.Local.sSerialize.Declare
+	
+	F.Global.Registry.ReadValue(V.Caller.User, V.Caller.CompanyCode, "GCG_6388_RMADash.g2u", 1, 1, 6, "", V.Local.sSerialize)
+	F.Intrinsic.Control.If(V.Local.sSerialize.Trim, <>, "")
+		Gui.frmRMA.GsGCRMA.Deserialize(V.Local.sSerialize)
+	F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndTry
+Program.Sub.Deserialize.End
+
+Program.Sub.LoaddtClosedRMA.Start
+F.Intrinsic.Control.Try
+	V.Local.sSQL.Declare
+	V.Local.sOriginal.Declare
+	V.Local.sExtraFeeNames.Declare
+	V.Local.sExtraFeeValues.Declare
+	V.Local.sToParse.Declare
+	V.Local.i.Declare
+	V.Local.j.Declare(Long)
+	V.Local.k.Declare(Long)
+	V.Local.iMatchIndex.Declare
+	V.Local.iRMALineValueSize.Declare
+	V.Local.sRMALineValue.Declare
+	'Will contain parsed extra fee titles & extra fee amt 
+	V.Local.sRMASubLineValue.Declare
+	'Used for notes and instances that don't adhere to " - " delimiter
+	V.Local.sNoteBuildup.Declare
+	V.Local.bStringHasBreak.Declare
+	V.Local.bNegativeCheck.Declare
+	V.Local.sRMA.Declare
+	V.Local.bHasForbiddenCaption.Declare
+	V.Local.sDate.Declare
+	V.Local.sDistributor.Declare
+	V.Local.sRep.Declare
+	V.Local.sBranchCode.Declare
+	V.Local.sLine.Declare
+	V.Local.bIsNum.Declare
+	
+	'RMA_HIST_HEADER RH
+	'CUSTOMER_MASTER CM
+	'RMA_LNSVRQ_H_NOTE RN
+	'RMA_SVC_REC RR
+	'RMA_HIST_LINES RL 
+	'RMA_HIST_LOT 
+	
+	V.Local.sSQL.Set("select RH.RMA_ID as RMA_NUMBER, RH.DATE_ISSUED, CM.NAME_CUSTOMER as DISTRIBUTOR, CM.SALESPERSON as REP, CM.TERRITORY as BRANCH_CODE, RN.ORDER_NO, RN.LINE, replace(replace(replace(RN.TEXT, 'FEE -$', 'FEE - -$'), 'TAL $', 'TAL - $'), '$', '') as FULL_AMT, RR.DESCR as RETURN_REASON, 'Y' as CLOSED from V_RMA_HIST_HEADER RH inner join V_CUSTOMER_MASTER CM on CM.CUSTOMER = RH.CUSTOMER inner join RMA_LNSVRQ_H_NOTE RN on RN.RMA_ID = RH.RMA_ID inner join V_RMA_HIST_LINES RL on RN.RMA_ID = RL.RMA_ID and RN.LINE = RL.RMA_LINE inner join RMA_SVC_REC RR on RL.SERVICE_REQUESTED = RR.SVC_ID order by RH.RMA_ID")
+	F.ODBC.Connection!con.OpenCompanyConnection
+	V.Global.bConOpen.Set(True)
+	F.Data.Datatable.CreateFromSQL("dtRMAHist", "con", V.Local.sSQL, True)
+	F.Data.Datatable.AddColumn("dtRMAHist", "ADDL_FEE_TITLE", "String")
+	'F.Data.Datatable.AddColumn("dtRMAHist", "CLOSED", "String")
+	
+	'Assuming data is laid out the same way as their open RMAs, reuse logic 	
+	'Last line has extra text/ dollar values that need to be parsed and added as row under their respective RMAs 
+	'Sure there's a better way than looping through one by one... 
+	F.Intrinsic.Control.For(V.Local.i, 0, V.DataTable.dtRMAHist.RowCount--, 1) 
+		V.Local.sOriginal.Set(V.DataTable.dtRMAHist(V.Local.i).FULL_AMT!FieldValTrim)
+		F.Intrinsic.String.Split(V.Local.sOriginal, V.Ambient.NewLine, V.Local.sRMALineValue)
+		'If size of "array" is 1, then leave alone. Means it just has a price 
+		F.Intrinsic.Math.Add(V.Local.sRMALineValue.UBound, 1, V.Local.iRMALineValueSize)
+		F.Intrinsic.Control.If(V.Local.iRMALineValueSize, <>, 1, AND, V.Local.sRMALineValue(0), <>, "")
+			'Iterate through the array on the RMA line containing parsed stuff/ things to further parse ie Extra Fee Names & Extra Fee Values 
+			F.Intrinsic.Control.For(V.Local.j, 0, V.Local.sRMALineValue.UBound, 1)
+				'If blank, skip and continue to next index
+				F.Intrinsic.Control.If(V.Local.sRMALineValue(V.Local.j), <>, "")
+					'Replace line's full amt entry w first index, which always contains a number
+					F.Intrinsic.Control.If(V.Local.j, =, 0)
+						F.Data.Datatable.SetValue("dtRMAHist", V.Local.i, "FULL_AMT", V.Local.sRMALineValue(V.Local.j))
+					'Otherwise check what kind of extra fee it is and parse the title from the amount
+					F.Intrinsic.Control.Else
+						'First get last line's data 
+						V.Local.sDate.Set(V.DataTable.dtRMAHist(V.Local.i).DATE_ISSUED!FieldValTrim)
+						V.Local.sDistributor.Set(V.DataTable.dtRMAHist(V.Local.i).DISTRIBUTOR!FieldValTrim)
+						V.Local.sRep.Set(V.DataTable.dtRMAHist(V.Local.i).REP!FieldValTrim)
+						V.Local.sBranchCode.Set(V.DataTable.dtRMAHist(V.Local.i).BRANCH_CODE!FieldValTrim)
+						V.Local.sRMA.Set(V.DataTable.dtRMAHist(V.Local.i).RMA_NUMBER!FieldValTrim)
+						F.Intrinsic.Math.Add(V.DataTable.dtRMAHist(V.Local.i).LINE!FieldValTrim, 1, V.Local.sLine)
+						F.Intrinsic.String.LPad(V.Local.sLine, "0", 6, V.Local.sLine)
+						F.Intrinsic.String.Split(V.Local.sRMALineValue(V.Local.j), " - ", V.Local.sRMASubLineValue)
+							F.Intrinsic.Control.If(V.Local.sRMASubLineValue.UBound, =, 1)
+								'Modify: No longer include TOTAL or SUBTOTAL in the grid at all. Check if last line contains total or subtotal and discard if so 
+								F.Intrinsic.String.IsInString(V.Local.sRMASubLineValue(0), "TOTAL", True, V.Local.bHasForbiddenCaption)
+								F.Intrinsic.Control.If(V.Local.bHasForbiddenCaption.Not)
+									'Add Title to column ADDL_FEE_TITLE & dollar amt to FULL_AMT (should have 2 indices, 0 = title, 1 = value)
+									'F.Data.Datatable.AddRow("dtRMA", "RMA_NUMBER", V.Local.sRMA, "ADDL_FEE_TITLE", V.Local.sRMASubLineValue(0), "ADDL_FEE_VALUE", V.Local.sRMASubLineValue(1))
+									'Reverse value to be negative? 
+									F.Intrinsic.String.IsInString(V.Local.sRMASubLineValue(1), "-", False, V.Local.bNegativeCheck.Declare)
+									'Only apply this to numeric data 
+									F.Intrinsic.Math.IsNumeric(V.Local.sRMASubLineValue(1), V.Local.bIsNum)
+									F.Intrinsic.Control.If(V.Local.bNegativeCheck, =, False, AND, V.Local.bIsNum, =, True)
+										F.Intrinsic.String.Build("-{0}", V.Local.sRMASubLineValue(1), V.Local.sRMASubLineValue(1))
+									F.Intrinsic.Control.EndIf
+									F.Data.Datatable.AddRow("dtRMAHist", "RMA_NUMBER", V.Local.sRMA, "ADDL_FEE_TITLE", V.Local.sRMASubLineValue(0), "FULL_AMT", V.Local.sRMASubLineValue(1), "DATE_ISSUED", V.Local.sDate, "DISTRIBUTOR", V.Local.sDistributor, "REP", V.Local.sRep, "BRANCH_CODE", V.Local.sBranchCode, "LINE", V.Local.sLine, "CLOSED", "Y")
+									'To keep RMAs together when user exports, move this newly added row below the bottom most RMA number 
+									F.Data.Datatable.MoveRow("dtRMAHist", V.DataTable.dtRMAHist.RowCount--, V.Local.i.++)
+								F.Intrinsic.Control.EndIf
+							F.Intrinsic.Control.Else
+							'Means data either has another case that doesn't adhere to being delimited by " - ", or contains a note. Concat all index values and set it to just the Full amt 
+								V.Local.sNoteBuildup.Set("")
+								F.Intrinsic.Control.For(V.Local.k, 0, V.Local.sRMASubLineValue.UBound, 1)
+									F.Intrinsic.String.Concat(V.Local.sNoteBuildup, V.Local.sRMASubLineValue(V.Local.k), V.Local.sNoteBuildup)
+								F.Intrinsic.Control.Next(V.Local.k)
+								'F.Data.Datatable.AddRow("dtRMA", "RMA_NUMBER", V.Local.sRMA, "FULL_AMT", V.Local.sNoteBuildup)
+								F.Data.Datatable.AddRow("dtRMAHist", "RMA_NUMBER", V.Local.sRMA, "FULL_AMT", V.Local.sNoteBuildup, "DATE_ISSUED", V.Local.sDate, "DISTRIBUTOR", V.Local.sDistributor, "REP", V.Local.sRep, "BRANCH_CODE", V.Local.sBranchCode, "LINE", V.Local.sLine, "CLOSED", "Y")
+								'To keep RMAs together when user exports, move this newly added row below the bottom most RMA number 
+								F.Data.Datatable.MoveRow("dtRMAHist", V.DataTable.dtRMAHist.RowCount--, V.Local.i.++)
+							F.Intrinsic.Control.EndIf
+					F.Intrinsic.Control.EndIf
+				F.Intrinsic.Control.EndIf
+			F.Intrinsic.Control.Next(V.Local.j)
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.Next(V.Local.i)
+	
+	F.ODBC.Connection!con.Close
+	V.Global.bConOpen.Set(False)
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndTry
+Program.Sub.LoaddtClosedRMA.End
+
+Program.Sub.Comments.Start
+${$5$}$3.0.0.0$}$1
+${$6$}$bmedina$}$20210712123857024$}$kOipCrsyLBVj2KoSwkcdK23ChxGVcBlEH6kwWVHrC73aScFex8FGFm75+XASnZ7bmFou6pora0M=
+Program.Sub.Comments.End
